@@ -1,0 +1,152 @@
+name: Review readiness - Cosmos SDK
+
+on:
+  push:
+    branches:
+      - validation/review-ready-2026-11-06
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CGO_ENABLED: '1'
+  CC: gcc
+  CXX: g++
+  GOTOOLCHAIN: local
+  GOMAXPROCS: '4'
+  GOFLAGS: -p=2
+
+defaults:
+  run:
+    shell: bash
+    working-directory: source
+
+jobs:
+  build-and-lint:
+    if: github.repository == 'zakazaka95/cosmos-sdk'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - pr: 26947
+            head: 6eb2d41de01154ae723df26bfebeaee086363d0c
+            tree: 5f68968ebc0ea5504368d7ef4f2f3daf6e30a6da
+            changed: collections/iter.go collections/iter_test.go collections/map.go
+          - pr: 26948
+            head: 8b2ff2bef95b6b79e202ccc6b638024f1b12bb45
+            tree: 760cbc0ec09fc5a7a660a017ae0367481072a860
+            changed: errors/errors.go errors/errors_test.go
+    name: Build and lint PR ${{ matrix.pr }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ matrix.head }}
+          path: source
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: source/go.mod
+          cache: false
+      - name: Verify exact source snapshot
+        env:
+          EXPECTED_HEAD: ${{ matrix.head }}
+          EXPECTED_TREE: ${{ matrix.tree }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$EXPECTED_TREE"
+          test "$(go env GOVERSION)" = "go$(awk '$1 == "go" {print $2; exit}' go.mod)"
+          git log -1 --format='%H %s'
+          go version
+      - name: Install native build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential pkg-config libudev-dev libusb-1.0-0-dev
+      - name: Check patch and Go formatting
+        env:
+          CHANGED_GO_FILES: ${{ matrix.changed }}
+        run: |
+          set -euo pipefail
+          git diff --check 37d870431339a792372c0ad460f65b4523a4fd3e...HEAD
+          test -z "$(gofmt -l $CHANGED_GO_FILES)"
+      - name: Build application
+        run: make build
+      - name: Run official Go-only PR lint path
+        env:
+          LINT_DIFF: '1'
+          GIT_DIFF: ${{ matrix.changed }}
+        run: make lint
+      - name: Confirm tracked source is unchanged
+        run: git diff --exit-code
+
+  unit-tests:
+    if: github.repository == 'zakazaka95/cosmos-sdk'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - pr: 26947
+            head: 6eb2d41de01154ae723df26bfebeaee086363d0c
+            tree: 5f68968ebc0ea5504368d7ef4f2f3daf6e30a6da
+            module: collections
+          - pr: 26948
+            head: 8b2ff2bef95b6b79e202ccc6b638024f1b12bb45
+            tree: 760cbc0ec09fc5a7a660a017ae0367481072a860
+            module: errors
+    name: Unit tests PR ${{ matrix.pr }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ matrix.head }}
+          path: source
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: source/go.mod
+          cache: false
+      - name: Verify exact source snapshot
+        env:
+          EXPECTED_HEAD: ${{ matrix.head }}
+          EXPECTED_TREE: ${{ matrix.tree }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$EXPECTED_TREE"
+          test "$(go env GOVERSION)" = "go$(awk '$1 == "go" {print $2; exit}' go.mod)"
+          git log -1 --format='%H %s'
+          go version
+      - name: Install native build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential pkg-config libudev-dev libusb-1.0-0-dev
+      - name: Run complete changed-module CI suite
+        env:
+          CHANGED_MODULE: ${{ matrix.module }}
+        run: |
+          set -euo pipefail
+          cd "$CHANGED_MODULE"
+          go test -mod=readonly -count=1 -timeout=30m -coverprofile=coverage.out -covermode=atomic -tags='norace ledger test_ledger_mock' ./...
+      - name: Run complete changed-module race suite
+        env:
+          CHANGED_MODULE: ${{ matrix.module }}
+        run: |
+          set -euo pipefail
+          cd "$CHANGED_MODULE"
+          go test -mod=readonly -count=1 -race -timeout=30m -tags='ledger test_ledger_mock' ./...
+      - name: Run required unit target across repository modules
+        run: make test-unit
+      - name: Confirm tracked source is unchanged
+        if: always()
+        run: git diff --exit-code
