@@ -1,0 +1,93 @@
+name: Cosmos SDK snapshot pruning baseline
+
+on:
+  push:
+    branches:
+      - validation/review-ready-baseline-2026-11-07
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cosmos-sdk-snapshot-baseline-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  baseline:
+    if: github.repository == 'zakazaka95/cosmos-sdk'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      BASE_HEAD: 37d870431339a792372c0ad460f65b4523a4fd3e
+      BASE_TREE: 358f66d3bdaf1743d48331693d90a9f02c3b1939
+      BASEAPP_TREE: b141a44a2b2fa4021521e8a62fc611f4c2f6cece
+      CGO_ENABLED: '1'
+      CC: gcc
+      CXX: g++
+      GOTOOLCHAIN: local
+      GOMAXPROCS: '4'
+      GOFLAGS: -p=2
+      CHECK_COMMAND: go test -mod=readonly -count=5 -timeout=10m -tags='cgo ledger test_ledger_mock norace' -run='^TestABCI_SnapshotWithPruning$/^default_pruning_with_snapshot$' ./baseapp
+    defaults:
+      run:
+        shell: bash
+        working-directory: source
+    steps:
+      - name: Check out the unchanged baseline
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: zakazaka95/cosmos-sdk
+          ref: 37d870431339a792372c0ad460f65b4523a4fd3e
+          path: source
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install the exact Go version
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version: '1.27.3'
+          cache: false
+      - name: Verify baseline identity and dependencies
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$BASE_HEAD"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$BASE_TREE"
+          test "$(git rev-parse HEAD:baseapp)" = "$BASEAPP_TREE"
+          test "$(go env GOVERSION)" = 'go1.27.3'
+          test -z "$(git status --porcelain)"
+          workspace=$(go env GOWORK)
+          test -z "$workspace" || test "$workspace" = off
+          go version
+          go list -m cosmossdk.io/collections cosmossdk.io/errors github.com/cosmos/cosmos-sdk/store/v2
+          {
+            echo '## Unchanged Cosmos SDK snapshot-pruning baseline'
+            printf 'Source commit: `%s`\n\n' "$(git rev-parse HEAD)"
+            printf 'Root tree: `%s`\n\n' "$(git rev-parse 'HEAD^{tree}')"
+            printf 'Baseapp tree: `%s`\n\n' "$(git rev-parse HEAD:baseapp)"
+            printf 'Toolchain: `%s`\n\n' "$(go version)"
+            echo '```sh'
+            printf '%s\n' "$CHECK_COMMAND"
+            echo '```'
+            echo 'This run checks the unchanged baseline; it does not certify a pull request.'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Install native build prerequisites
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential pkg-config libudev-dev libusb-1.0-0-dev
+      - name: Repeat only the snapshot-retention subtest
+        run: |
+          set -uo pipefail
+          set +e
+          go test -mod=readonly -count=5 -timeout=10m -tags='cgo ledger test_ledger_mock norace' -run='^TestABCI_SnapshotWithPruning$/^default_pruning_with_snapshot$' ./baseapp
+          test_status=$?
+          set -e
+          printf '\nTargeted test exit code: `%s`\n' "$test_status" >> "$GITHUB_STEP_SUMMARY"
+          exit "$test_status"
+      - name: Confirm tracked source is unchanged
+        if: always()
+        run: git diff --exit-code
+      - name: Record job result
+        if: always()
+        working-directory: ${{ github.workspace }}
+        run: |
+          printf '\nBaseline job result: `%s`\n' '${{ job.status }}' >> "$GITHUB_STEP_SUMMARY"
